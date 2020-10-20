@@ -26,23 +26,12 @@ uint16_t	icmpChecksum(uint16_t *data, uint32_t len);
 void hexdumpBuf(char *buf, uint32_t len);
 double getDiffTimeval(const timeval &t1, const timeval &t2);
 
-/*  struct addrinfo {
-        int              ai_flags;
-        int              ai_family;
-        int              ai_socktype;
-        int              ai_protocol;
-        socklen_t        ai_addrlen;
-        struct sockaddr *ai_addr;
-        char            *ai_canonname;
-        struct addrinfo *ai_next;
-    };
+bool loop = true;
 
-    struct sockaddr {
-        __uint8_t       sa_len;          //total length
-        sa_family_t     sa_family;       //[XSI] address family
-        char            sa_data[14];     //[XSI] addr value (actually larger)
-    };
-*/
+void onSigIntReceive(int)
+{
+   loop = false;
+}
 
 int main(int ac, char *av[])
 {
@@ -52,7 +41,7 @@ int main(int ac, char *av[])
         printf("usage: %s address\n", av[0]);
         return 1;
     }
-
+    signal(SIGINT, onSigIntReceive);
     addrinfo hints = {0};
     hints.ai_family = AF_INET; // IPv4
     hints.ai_socktype = SOCK_RAW;
@@ -85,16 +74,6 @@ int main(int ac, char *av[])
         cout << "ERROR socket(). impossible to create the socket" << endl;
         return 1;
     }
-
-    INADDR_ANY;
-    struct sockaddr_in
-    {
-        __uint8_t sin_len;
-        sa_family_t sin_family;
-        in_port_t sin_port;
-        struct in_addr sin_addr;
-        char sin_zero[8];
-    };
 
     sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -141,7 +120,7 @@ int main(int ac, char *av[])
 
     cout << "PING " << av[1] << " (" << addrPrint << "): " << sizeof(icmpPing) << " data bytes" << endl;
 
-    bool loop = true;
+    int paquetLoss = 0;
     while (loop)
     {
         timeval tSend = {0};
@@ -160,7 +139,7 @@ int main(int ac, char *av[])
 
         ip *ipHeader;
         icmp *icmpHeader;
-        bool trash = false;
+        bool receiveFail = false;
         do
         {
             ssize_t retRecv = recvmsg(sockFd, &msgRecv, 0);
@@ -171,9 +150,12 @@ int main(int ac, char *av[])
             }
             ipHeader = (ip*)buf;
             icmpHeader = (icmp*)(buf + ipHeader->ip_hl * 4);
-            if (trash)
-                cout << "poubelle" << endl;
-            trash = true;
+            if (receiveFail)
+            {
+                paquetLoss++;
+            }
+
+            receiveFail = true;
         }
         while (ipHeader->ip_p != IPPROTO_ICMP || icmpHeader->icmp_type != ICMP_ECHOREPLY
                 || icmpHeader->icmp_code != 0 || icmpHeader->icmp_hun.ih_idseq.icd_id != (uint16_t)getpid());
@@ -192,9 +174,11 @@ int main(int ac, char *av[])
         icmpPing.icmp_hun.ih_idseq.icd_seq++;
 
         sleep(1);
-        //loop = false;
     }
-
+    uint16_t paquets = icmpPing.icmp_hun.ih_idseq.icd_seq;
+    cout << endl << "--- " << av[1] << " ping statistics ---" << endl;
+    cout << icmpPing.icmp_hun.ih_idseq.icd_seq << " packets transmitted, " << paquets - paquetLoss << " received, " <<
+            paquetLoss * 100 / paquets << "% packet loss" << endl;
     freeaddrinfo(addrInfoLstFirst);
     return 0;
 }
@@ -251,7 +235,7 @@ void printAddrInfo(addrinfo *pAddrInfo)
     cout << "ai_addrlen: " << pAddrInfo->ai_addrlen << endl;
     if (pAddrInfo->ai_addr)
     {
-        cout << "ai_addr->sa_len: " << (int) pAddrInfo->ai_addr->sa_len << endl;
+        //cout << "ai_addr->sa_len: " << (int) pAddrInfo->ai_addr->sa_len << endl;
         cout << "ai_addr->sa_family: " << (int) pAddrInfo->ai_addr->sa_family << endl;
         cout << "ai_addr->sa_data[14]: ";
         for (int d = 0; d < 14; d++)
