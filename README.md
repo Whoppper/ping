@@ -1,9 +1,9 @@
 # ping
 send ICMP ECHO_REQUEST packets to network hosts
 
+
 ## Usage
 
-Below is another example of displaying
 ````shell
 /> ./ping google.com
 PING google.com (216.58.211.206): 28 data bytes
