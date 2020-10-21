@@ -2,35 +2,39 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <stdio.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <string.h>
 #include <stdlib.h>
-
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #include <iomanip>
 #include <time.h>
-#include <fcntl.h>
 #include <signal.h>
-#include <time.h>
 #include <sys/time.h>
 
 using std::cout;
 using std::endl;
 
-void printAddrInfo(addrinfo *pAddrInfo);
 uint16_t	icmpChecksum(uint16_t *data, uint32_t len);
-void hexdumpBuf(char *buf, uint32_t len);
-double getDiffTimeval(const timeval &t1, const timeval &t2);
+void        hexdumpBuf(char *buf, uint32_t len);
+double      getDiffTimeval(const timeval &t1, const timeval &t2);
+bool        isEchoReply(uint8_t *buf, ssize_t retRecv);
 
 bool loop = true;
+bool isTimeout = false;
 
-void onSigIntReceive(int)
+void onSignalReceived(int sig)
 {
-   loop = false;
+    if (sig == SIGINT)
+    {
+        loop = false;
+    }
+    else if (sig == SIGALRM)
+    {
+        isTimeout = true;
+    }
 }
 
 int main(int ac, char *av[])
@@ -41,7 +45,8 @@ int main(int ac, char *av[])
         printf("usage: %s address\n", av[0]);
         return 1;
     }
-    signal(SIGINT, onSigIntReceive);
+    signal(SIGINT, onSignalReceived);
+    signal(SIGALRM, onSignalReceived);
     addrinfo hints = {0};
     hints.ai_family = AF_INET; // IPv4
     hints.ai_socktype = SOCK_RAW;
@@ -49,10 +54,10 @@ int main(int ac, char *av[])
 
     addrinfo *addrInfoLst;
 
-    int ret = getaddrinfo(av[1], NULL, &hints, &addrInfoLst);
+    int ret = getaddrinfo(av[1], nullptr, &hints, &addrInfoLst);
     if (ret)
     {
-        cout << "ERROR getaddrinfo()" << endl;
+        cout << "ping: cannot resolve " << av[1] << ": Unknown host" << endl;
         return 1;
     }
     //printAddrInfo(((sockaddr_in*)addrInfoLst->ai_addr)->sin_addr);
@@ -87,8 +92,8 @@ int main(int ac, char *av[])
         cout << "retBind error: " << retBind << endl;
     }
 
-    int ttl = 255;
-    ret = setsockopt(sockFd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
+    int setSocketTTL = 255;
+    ret = setsockopt(sockFd, IPPROTO_IP, IP_TTL, &setSocketTTL, sizeof(setSocketTTL));
     if (ret == -1)
     {
         perror("perror setsockopt 1");
@@ -104,7 +109,7 @@ int main(int ac, char *av[])
 
 
     //struct for recvmsg()
-    int8_t buf[2048];
+    uint8_t buf[2048];
     uint8_t bufMsgControl[2048];
     iovec iovec;
     iovec.iov_base = buf;
@@ -137,39 +142,50 @@ int main(int ac, char *av[])
             return 1;
         }
 
-        ip *ipHeader;
-        icmp *icmpHeader;
-        bool receiveFail = false;
-        do
+        //Met l'alarme a 1 seconde pour gerer le timeout
+        alarm(1);
+
+        //boucle de receive
+        while (!isTimeout)
         {
-            ssize_t retRecv = recvmsg(sockFd, &msgRecv, 0);
+            ssize_t retRecv = recvmsg(sockFd, &msgRecv, MSG_DONTWAIT);
             if (retRecv == -1)
             {
-                cout << "Error recvmsg()" << endl;
-                return 1;
+                //cout << "Error recvmsg() : "<<retRecv << endl;
+                //cout << "." << endl
+                //return 1;
             }
-            ipHeader = (ip*)buf;
-            icmpHeader = (icmp*)(buf + ipHeader->ip_hl * 4);
-            if (receiveFail)
+            if (isEchoReply(buf, retRecv))
             {
-                paquetLoss++;
+                //Annulation de l'alarme
+                alarm(0);
+                break;
             }
-
-            receiveFail = true;
         }
-        while (ipHeader->ip_p != IPPROTO_ICMP || icmpHeader->icmp_type != ICMP_ECHOREPLY
-                || icmpHeader->icmp_code != 0 || icmpHeader->icmp_hun.ih_idseq.icd_id != (uint16_t)getpid());
 
-        uint8_t ttl = ipHeader->ip_ttl;
-        uint8_t length = ipHeader->ip_len + ipHeader->ip_hl * 4;
-        timeval tRecv = {0};
-        gettimeofday(&tRecv, nullptr);
+        if (isTimeout)
+        {
+            //timeout - pas de reponse au ping
+            cout << "Request timeout for icmp_seq " << icmpPing.icmp_hun.ih_idseq.icd_seq << endl;
+            isTimeout = false;
+            paquetLoss++;
+        }
+        else
+        {
+            //retour du ping
+            ip *ipHeader;
+            ipHeader = (ip*)buf;
+            uint8_t ttl = ipHeader->ip_ttl;
+            uint8_t length = ipHeader->ip_len + ipHeader->ip_hl * 4;
+            timeval tRecv = {0};
+            gettimeofday(&tRecv, nullptr);
 
-        cout << (uint16_t)length
-        << " bytes from " << addrPrint
-        << " icmp_seq=" << icmpPing.icmp_hun.ih_idseq.icd_seq
-        << " ttl=" << (uint16_t)ttl
-        << " time=" << getDiffTimeval(tSend, tRecv) << " ms" << endl;
+            cout << (uint16_t)length
+            << " bytes from " << addrPrint
+            << " icmp_seq=" << icmpPing.icmp_hun.ih_idseq.icd_seq
+            << " ttl=" << (uint16_t)ttl
+            << " time=" << getDiffTimeval(tSend, tRecv) << " ms" << endl;
+        }
 
         icmpPing.icmp_hun.ih_idseq.icd_seq++;
 
@@ -183,6 +199,26 @@ int main(int ac, char *av[])
     return 0;
 }
 
+bool isEchoReply(uint8_t *buf, ssize_t retRecv)
+{
+    ip *ipHeader;
+    icmp *icmpHeader;
+
+    if (retRecv >= (long)sizeof(ip))
+    {
+        ipHeader = (ip*)buf;
+        if (ipHeader->ip_p == IPPROTO_ICMP && retRecv >= sizeof(ip) + ipHeader->ip_hl * 4)
+        {
+            icmpHeader = (icmp*)(buf + ipHeader->ip_hl * 4);
+            if (icmpHeader->icmp_type == ICMP_ECHOREPLY && icmpHeader->icmp_code == 0
+                && icmpHeader->icmp_hun.ih_idseq.icd_id == (uint16_t)getpid())
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 double getDiffTimeval(const timeval &t1, const timeval &t2)
 {
@@ -224,30 +260,4 @@ uint16_t	icmpChecksum(uint16_t *data, uint32_t len)
     checksum = (checksum >> 16) + (checksum & 0xffff);
     checksum = checksum + (checksum >> 16);
     return (uint16_t)(~checksum);
-}
-
-void printAddrInfo(addrinfo *pAddrInfo)
-{
-    cout << "ai_flags: " << pAddrInfo->ai_flags << endl;
-    cout << "ai_family: " << pAddrInfo->ai_family << endl;
-    cout << "ai_socktype: " << pAddrInfo->ai_socktype << endl;
-    cout << "ai_protocol: " << pAddrInfo->ai_protocol << endl;
-    cout << "ai_addrlen: " << pAddrInfo->ai_addrlen << endl;
-    if (pAddrInfo->ai_addr)
-    {
-        //cout << "ai_addr->sa_len: " << (int) pAddrInfo->ai_addr->sa_len << endl;
-        cout << "ai_addr->sa_family: " << (int) pAddrInfo->ai_addr->sa_family << endl;
-        cout << "ai_addr->sa_data[14]: ";
-        for (int d = 0; d < 14; d++)
-        {
-            cout << (int) (uint8_t) pAddrInfo->ai_addr->sa_data[d] << " ";
-        }
-        cout << endl;
-    }
-    if (pAddrInfo->ai_canonname)
-    {
-        pAddrInfo->ai_canonname[14] = 0;
-        cout << "ai_canonname: " << pAddrInfo->ai_canonname << endl << endl;
-    }
-    cout << endl;
 }
